@@ -1,0 +1,5 @@
+- [ ] DRemailer class
+- [ ] DSender class
+- [ ] Timer invio mailcount/min
+- [ ] Memorizza email su disco
+- [ ] Invia email from queue (elimina da disco)
