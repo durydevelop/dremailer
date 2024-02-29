@@ -1,20 +1,19 @@
 TODO:
-- [ ] logger: {
-    trace: [Function (anonymous)],
-    debug: [Function (anonymous)],
-    info: [Function (anonymous)],
-    warn: [Function (anonymous)],
-    error: [Function (anonymous)],
-    fatal: [Function (anonymous)]
-  },
-
 - [x] suspendSender()
 - [x] suspendListener()
 - [ ] onWaring()
 - [ ] express routes:
     - [x] /control
+        - [ ] start
+        - [ ] stop
+        - [ ] set config
         - [x] suspendListener
         - [x] suspendSender
+        - [ ] storage list
+        - [ ] get status
+        - [ ] get info
+-[ ] EML_PARKING_BACKUP
+-[ ] EML_DIRECT_BACKUP
 
 DONE:
 0.0.1

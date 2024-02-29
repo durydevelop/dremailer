@@ -2,7 +2,6 @@ import nodemailer , { Transporter } from "nodemailer";
 import SMTPConnection from "nodemailer/lib/smtp-connection";
 import Mail from "nodemailer/lib/mailer";
 import fs from "fs";
-import path from "path"
 import { AddressObject, simpleParser } from "mailparser"
 import { DLogger as log } from "./dlogger";
 
@@ -19,12 +18,12 @@ import { DLogger as log } from "./dlogger";
     TODO:
     dsn – optional object to define DSN options
 
-id – is the envelope identifier that would be included in the response (ENVID)
-return – is either ‘headers’ or ‘full’. It specifies if only headers or the entire body of the message should be included in the response (RET)
-notify – is either a string or an array of strings that define the conditions under which a DSN response should be sent. Possible values are ‘never’, ‘success’, ‘failure’ and ‘delay’. The condition ‘never’ can only appear on its own, other values can be grouped together into an array (NOTIFY)
-recipient – is the email address the DSN should be sent (ORCPT)
+    id – is the envelope identifier that would be included in the response (ENVID)
+    return – is either ‘headers’ or ‘full’. It specifies if only headers or the entire body of the message should be included in the response (RET)
+    notify – is either a string or an array of strings that define the conditions under which a DSN response should be sent. Possible values are ‘never’, ‘success’, ‘failure’ and ‘delay’. The condition ‘never’ can only appear on its own, other values can be grouped together into an array (NOTIFY)
+    recipient – is the email address the DSN should be sent (ORCPT)
 
-{
+    {
         id: 'some random message specific id',
         return: 'headers',
         notify: 'success',
@@ -81,6 +80,7 @@ export class DMailSender {
     /**
      * Initilize all stuff.
      * Must be called befor using class.
+     * On succesfully init this.status.ready is true.
      * @returns this.
      */
     init() : DMailSender {
@@ -116,11 +116,13 @@ export class DMailSender {
     }
 
     /**
+     * Forward an eml file content as a real email (not forwarded).
+     * A new email is composed from eml file content informations (from, to, subject, etc...).
      * Async version
      * @param emailFilename 
-     * @returns 
+     * @returns a Promise conatining info object received from server.
      */
-    async forwardEml(emailFilename: fs.PathLike) {
+    async forwardEml(emailFilename: fs.PathLike) : Promise<any> {
         if (!this.status.ready) {
             return Promise.reject(new Error(log.e(this.status.message)))
         }
@@ -268,7 +270,7 @@ export class DMailSender {
         this.transporter=undefined;
     }
 
-    async isConnected() : Promise<boolean> {
+    async isServerReady() : Promise<boolean> {
         // verify connection configuration
         if (this.transporter) {
             let res=this.transporter.verify().catch((err) => {

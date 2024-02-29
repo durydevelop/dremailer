@@ -1,17 +1,19 @@
 import { SMTPServer, SMTPServerAuthentication, SMTPServerAuthenticationResponse, SMTPServerDataStream, SMTPServerSession } from "smtp-server";
-import { DMailSender } from "./dsender";
+import { DMailSender } from "./dmailsender";
 import fss from "fs";
 import fsu from "fs/promises";
 import path from "path";
-import { DMailSenderConfig } from "./dsender";
+import { DMailSenderConfig } from "./dmailsender";
 import SMTPConnection from "nodemailer/lib/smtp-connection";
 import { nullStream } from "./utils";
 import { DLogger as log } from "./dlogger";
 
 const DEFAULT_EML_STORAGE = path.join(__dirname,"storage");
-const EML_PARKING = "eml-parking";
-const EML_DIRECT = "eml-direct";
-const EML_ERROR = "eml-error";
+const EML_PARKING = "eml-parking";                  // Where timed emails are stored
+const EML_DIRECT = "eml-direct";                    // Where emails are stored for immediate fordwarding
+const EML_ERROR = "eml-error";                      // Where emails are stored in case of sending error
+const EML_PARKING_BACKUP = "eml-parking-backup";    // Where timed emails are backupped
+const EML_DIRECT_BACKUP = "eml-direct-backup";      // Where immediate email are backupped
 
 const MODE_DIRECT_FORWARD="DIRECT FORWARD";
 const MODE_STORAGE="STORAGE ONLY";
@@ -44,11 +46,12 @@ export interface DRemailerConfig {
     senderIgnoreInvalidCert?: boolean;
     senderAuth?: SMTPConnection.AuthenticationType;
     senderLmtp?: boolean;       // smtp forwarding server lmtp mode
-    emlStorageFolder?: string;        // Local folder in which store emails
+    emlStorageFolder?: string;  // Local root folder for emails storage
     sslKey?: string;            // filename of a ssl .key file
     sslCert?: string;           // filename of a sss .crt file
     logEnabled?: boolean;       // Enable, disable log
-    timerIntervalSec?: number; // Interval between each forwarding
+    timerIntervalSec?: number;  // Interval between each forwarding
+    backupEnabled: boolean;     // If true, sent email are backupped
     onReceiving?: DEventCallback;
     onSaving?: DEventCallback;
     onSaved?: DEventCallback;
@@ -72,7 +75,9 @@ export class DRemailer {
     timerIntervalMs: number = 0;
 
     // Storage stuff
-    emlQueue = new Array<string>();
+    emlParkingQueue = new Array<string>();
+    emlDirectQueue = new Array<string>();
+    emlErrorQueue = new Array<string>();
     isEmlScanning: boolean = false;
     emlParkingDir: string | undefined = undefined;
     emlDirectDir: string | undefined = undefined;
@@ -283,17 +288,27 @@ export class DRemailer {
         return DRemailer.mailSender.status.ready;
     }
 
-    isStorageReady() : boolean {
-        if (this.timerIntervalMs > 0) {
-            if (this.emlParkingDir && this.emlErrorDir) {
-                // Timer enabled and parking dir available
-                return true;
-            }
-        }
-        else {
-            if (this.emlDirectDir && this.emlErrorDir) {
-                // Timer disable and durect dir enabled
-                return true;
+    isStorageReady(checkExisting?: boolean) : boolean {
+        if (this.emlParkingDir && this.emlDirectDir && this.emlErrorDir) {
+            if (checkExisting) {
+                log.d("Check existing");
+                let found=true;
+                if (!fss.existsSync(this.emlParkingDir)) {
+                    this.emlParkingDir=undefined;
+                    found=false;
+                }
+                if (!fss.existsSync(this.emlDirectDir)) {
+                    this.emlDirectDir=undefined;
+                    found=false;
+                }
+                if (!fss.existsSync(this.emlErrorDir)) {
+                    this.emlErrorDir=undefined;
+                    found=false;
+                }
+
+                if (found) {
+                    return true;
+                }
             }
         }
 
@@ -369,10 +384,13 @@ export class DRemailer {
      * Scan eml files storage folder and fill this.emlQueue with filenames list (async version).
      * @returns true on fs read error, otherwise true.
      */
-    private async scanParking() {
+    private async scanStorage() {
         log.d("Scanning eml files...");
-        if (!this.emlParkingDir) {
-            this.emlQueue = [];
+        if (!this.isStorageReady()) {
+            // Storage not ready, clean all queues
+            this.emlParkingQueue = [];
+            this.emlDirectQueue = [];
+            this.emlErrorQueue = [];
             const err=new Error("Parking storage folder not available");
             this.status = { ready: false, message: log.e(err.message) };
             this.config.onError?.(err);
@@ -384,60 +402,48 @@ export class DRemailer {
             return;
         }
 
-        if (!fss.existsSync(this.emlParkingDir)) {
-            this.emlQueue = [];
-            const err=new Error("Parking storage folder does not exist");
-            this.status = { ready: false, message: log.e(err.message) };
-            this.config.onError?.(err);
-            return Promise.reject(err);
-        }
-        
         this.isEmlScanning = true;
-        const scanningDir=this.emlParkingDir;
-        return new Promise<void>((resolve,reject) => {
-            fss.readdir(scanningDir, {withFileTypes: true}, (err, files) => {
-                this.isEmlScanning = false;
-                if (err) {
-                    this.emlQueue = [];
-                    const err=new Error("Parking storage folder not available");
-                    this.status = { ready: false, message: log.e(err.message) };
-                    this.config.onError?.(err);
-                    return reject(err);
-                }   
-                else {
-                    this.emlQueue=files.filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
-                    this.status = { ready: true, message: log.d("eml files scanning end, files count: "+this.emlQueue.length) };
-                    return resolve();
-                }
-            })
-        });
+        let parkingScanning=true;
+        //return new Promise<void>(function (resolve,reject) {
+            if (this.emlParkingDir) {
+                fss.readdir(this.emlParkingDir, {withFileTypes: true}, (err, files) => {
+                    parkingScanning = false;
+                    if (err) {
+                        this.emlParkingQueue=[];
+                        const error=new Error("Parking storage scanning error: "+err.message);
+                        this.config.onError?.(error);
+                    }   
+                    else {
+                        this.emlParkingQueue=files.filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
+                    }
+                })
+            }
+
+            this.status = { ready: true, message: log.d("eml files scanning end, files count: "+this.emlQueue.length) };
+            this.status = { ready: false, message: log.e(err.message) };
+        //});
     }
 
     /**
      * Scan eml files storage folder and fill this.emlQueue with filenames list (sync version).
      * @returns true on fs read error, otherwise true.
      */
-    private scanParkingSync() : boolean {
+    private scanStorageSync() : boolean {
         log.d("Scanning eml files...");
-        if (!this.emlParkingDir) {
-            this.emlQueue = [];
+        if (!this.isStorageReady()) {
+            // Storage not ready, clean all queues
+            this.emlParkingQueue = [];
+            this.emlDirectQueue = [];
+            this.emlErrorQueue = [];
             const err=new Error("Parking storage folder not available");
-            this.config.onError?.(err);
             this.status = { ready: false, message: log.e(err.message) };
-            return false;
+            this.config.onError?.(err);
+            return Promise.reject(err);
         }
 
         if (this.isEmlScanning) {
             log.w("Already scanning...")
-            return true;
-        }
-
-        if (!fss.existsSync(this.emlParkingDir)) {
-            this.emlQueue = [];
-            const err=new Error("Parking storage folder does not exist");
-            this.status = { ready: false, message: log.e(err.message) };
-            this.config.onError?.(err);
-            return false;
+            return;
         }
 
         this.isEmlScanning = true;
