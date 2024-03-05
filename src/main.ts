@@ -2,6 +2,7 @@ import { DRemailer, DRemailerConfig } from "./dremailer";
 import { DLogger, DLoggerConfig, DLogger as log } from "./dlogger";
 import path from "path";
 import { SMTPServerAddress } from "smtp-server";
+import { startRemailerControlApi } from "./routes";
 
 const LISTEN_PORT = 2524;
 const LISTEN_ADDRESS = '0.0.0.0';
@@ -49,6 +50,7 @@ const config: DRemailerConfig = {
     senderAuth: { user: SENDER_USERNAME, pass: SENDER_PASSWORD },
     //emlStorageFolder: "storage",
     logEnabled: true,
+    backupEnabled: true,
     //sslKey: "",
     //sslCert: ""
     onReceiving: (session) => {
@@ -71,51 +73,18 @@ const config: DRemailerConfig = {
     },
     onError: (err) => {
         log.e(err.message);
+    },
+    onWarning: (warning) => {
+        log.w(warning.message);
     }
 }
 
 let remailer=DRemailer.New(config);
-remailer.showSummary();
 remailer.start();
+remailer.showSummary();
+
+startRemailerControlApi(remailer,16000,"dury");
 
 function extractAdresses(rcptTo: SMTPServerAddress[]) {
     return rcptTo.map((address) => address.address).join(" ");
-}
-
-
-import express, { Request, Response, NextFunction } from "express"
-const app=express();
-startAdminAPI(16000,"dury");
-
-function startAdminAPI(port: number, apiKey: string) {
-    function checkApiKey(req: Request, res: Response, next: NextFunction) {
-        const submittedAPIKey = req.query.api_key as string;
-        //log.d("req.query",req.query);
-        if (!submittedAPIKey || submittedAPIKey.trim() !== apiKey) {
-            res.status(401)
-            res.json({ message: 'Access denied' })
-        }
-        else {
-            next()
-        }
-    }
-  
-    app.use(checkApiKey)
-
-    app.post("/api/remailer/control", async (req,res) => {
-        if (req.query.suspend_sender) {
-            //log.d("req.query.suspend_sender",req.query.suspend_sender);
-            remailer.suspendSender(req.query.suspend_sender == "true" ? true : false);
-        }
-        if (req.query.suspend_listener) {
-            //log.d("req.query.suspend_sender",req.query.suspend_sender);
-            remailer.suspendListener(req.query.suspend_listener == "true" ? true : false);
-        }
-        remailer.showSummary();
-        return res.status(200).json("done");
-    })
-
-    app.listen(port, () => {
-        log.d("app.listen()")
-    });
 }

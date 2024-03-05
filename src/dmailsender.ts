@@ -152,7 +152,7 @@ export class DMailSender {
                     reject(err);
                 })
                 .then((parsedEmail) => {
-                    log.d("parsedEmail=",parsedEmail);
+                    //log.d("parsedEmail=",parsedEmail);
                     if (!parsedEmail) {
                         return reject(new Error(log.e("simpleParser result empty")));
                     }

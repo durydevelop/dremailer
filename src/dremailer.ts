@@ -5,7 +5,7 @@ import fsu from "fs/promises";
 import path from "path";
 import { DMailSenderConfig } from "./dmailsender";
 import SMTPConnection from "nodemailer/lib/smtp-connection";
-import { nullStream } from "./utils";
+import { findFiles, nullStream } from "./utils";
 import { DLogger as log } from "./dlogger";
 
 const DEFAULT_EML_STORAGE = path.join(__dirname,"storage");
@@ -15,9 +15,43 @@ const EML_ERROR = "eml-error";                      // Where emails are stored i
 const EML_PARKING_BACKUP = "eml-parking-backup";    // Where timed emails are backupped
 const EML_DIRECT_BACKUP = "eml-direct-backup";      // Where immediate email are backupped
 
-const MODE_DIRECT_FORWARD="DIRECT FORWARD";
-const MODE_STORAGE="STORAGE ONLY";
-const MODE_TIMED="TIMED FORWARD";
+export interface DRemailerStatus{
+    listener: {
+        ready: boolean;
+        running: boolean;
+        address: string;
+        port: number;
+        mode: string;
+        TLS: boolean;
+    };
+
+    sender: {
+        ready: boolean;
+        running: boolean;
+        host: string;
+        port: number;
+        mode: string;
+        TLS: boolean;
+        ignoreCRT: boolean;
+    }
+
+    storage: {
+        ready: boolean;
+    }
+
+    timer: {
+        enabled: boolean;
+        sec: number;
+    }
+};
+
+export interface DRemailerStorage {
+    parking: string[];
+    direct: string[];
+    error: string[];
+    parkingBackup: string[];
+    directBackup: string[];
+}
 
 //! Status interface 
 interface DStatus { ready: boolean, message: string };
@@ -51,7 +85,7 @@ export interface DRemailerConfig {
     sslCert?: string;           // filename of a sss .crt file
     logEnabled?: boolean;       // Enable, disable log
     timerIntervalSec?: number;  // Interval between each forwarding
-    backupEnabled: boolean;     // If true, sent email are backupped
+    backupEnabled?: boolean;     // If true, sent email are backupped
     onReceiving?: DEventCallback;
     onSaving?: DEventCallback;
     onSaved?: DEventCallback;
@@ -59,6 +93,7 @@ export interface DRemailerConfig {
     onForwarding?: DForwardingCallback;
     onForwarded?: DForwardingCallback;
     onError?: DErrorCallback;
+    onWarning?: DErrorCallback;
 }
 
 /**
@@ -78,10 +113,14 @@ export class DRemailer {
     emlParkingQueue = new Array<string>();
     emlDirectQueue = new Array<string>();
     emlErrorQueue = new Array<string>();
-    isEmlScanning: boolean = false;
+    emlParkingBackupQueue = new Array<string>();
+    emlDirectBackupQueue = new Array<string>();
+    emlScanning: boolean = false;
     emlParkingDir: string | undefined = undefined;
     emlDirectDir: string | undefined = undefined;
     emlErrorDir: string | undefined = undefined;
+    emlParkingBackupDir: string | undefined = undefined;
+    emlDirectBackupDir: string | undefined = undefined;
 
     // Initial status
     public status: DStatus = { ready: false, message: "Need to call init() before use this class" };
@@ -196,7 +235,7 @@ export class DRemailer {
             };
             DRemailer.mailSender = new DMailSender(senderConfig);
             DRemailer.mailSender.init();
-            if (DRemailer.mailSender.status.ready) {
+            if (!DRemailer.mailSender.status.ready) {
                 const err=new Error("Sender init error: "+DRemailer.mailSender.status.message);
                 log.e(err.message);
                 this.config.onError?.(err);
@@ -204,6 +243,23 @@ export class DRemailer {
         }
 
         log.d("Init storage");
+        this.initStorage();
+
+        log.d("Init timer");
+        this.initSenderTimer();
+        
+        if (!this.isSenderReady() && !this.isStorageReady(true)) {
+            const err=new Error("Init failed: sender and storage are not ready");
+            this.status = { ready: false, message: log.e(err.message) };
+            this.config.onError?.(err);
+        }
+        else {
+            this.status = { ready: true, message: log.d("Init SUCCESS") };
+        }
+        return this;
+    }
+
+    initStorage() {
         if (this.config.emlStorageFolder && this.config.emlStorageFolder.length > 0) {
             // Storage root
             if (!path.isAbsolute(this.config.emlStorageFolder)) {
@@ -211,17 +267,23 @@ export class DRemailer {
                 this.emlParkingDir=path.join(__dirname, path.basename(this.config.emlStorageFolder), EML_PARKING);
                 this.emlDirectDir=path.join(__dirname, path.basename(this.config.emlStorageFolder), EML_DIRECT);
                 this.emlErrorDir=path.join(__dirname, path.basename(this.config.emlStorageFolder), EML_ERROR);
+                this.emlParkingBackupDir=path.join(__dirname, path.basename(this.config.emlStorageFolder), EML_PARKING_BACKUP);
+                this.emlDirectBackupDir=path.join(__dirname, path.basename(this.config.emlStorageFolder), EML_DIRECT_BACKUP);
             }
             else {
                 this.emlParkingDir=path.join(this.config.emlStorageFolder, EML_PARKING);
                 this.emlDirectDir=path.join(this.config.emlStorageFolder, EML_DIRECT);
                 this.emlErrorDir=path.join(this.config.emlStorageFolder, EML_ERROR);
+                this.emlParkingBackupDir=path.join(this.config.emlStorageFolder, EML_PARKING_BACKUP);
+                this.emlDirectBackupDir=path.join(this.config.emlStorageFolder, EML_DIRECT_BACKUP);
             }
         }
         else {
             this.emlParkingDir=path.join(DEFAULT_EML_STORAGE,EML_PARKING);
             this.emlDirectDir=path.join(DEFAULT_EML_STORAGE,EML_DIRECT);
             this.emlErrorDir=path.join(DEFAULT_EML_STORAGE, EML_ERROR);
+            this.emlParkingBackupDir=path.join(DEFAULT_EML_STORAGE, EML_PARKING_BACKUP);
+            this.emlDirectBackupDir=path.join(DEFAULT_EML_STORAGE, EML_DIRECT_BACKUP);
         }
 
         // Check existing
@@ -264,18 +326,38 @@ export class DRemailer {
             }
         }
 
-        log.d("Init Timer");
-        this.initSenderTimer();
-        
-        if (!this.isSenderReady() && !this.isStorageReady()) {
-            const err=new Error("Init failed: sender and storage are not ready");
-            this.status = { ready: false, message: log.e(err.message) };
-            this.config.onError?.(err);
+        if (!fss.existsSync(this.emlParkingBackupDir)) {
+            // Does not exists
+            log.d("Create missing folder "+this.emlParkingBackupDir);
+            try {
+                fss.mkdirSync(this.emlParkingBackupDir, { recursive: true });
+            }catch(err) {
+                const error=new Error("Cannot create parking backup storage folder: "+err);
+                log.e(error.message);
+                this.config.onError?.(error);
+                this.emlParkingBackupDir=undefined;
+            }
         }
-        else {
-            this.status = { ready: true, message: log.d("Init SUCCESS") };
+
+        if (!fss.existsSync(this.emlDirectBackupDir)) {
+            // Does not exists
+            log.d("Create missing folder "+this.emlDirectBackupDir);
+            try {
+                fss.mkdirSync(this.emlDirectBackupDir, { recursive: true });
+            }catch(err) {
+                const error=new Error("Cannot create direct backup storage folder: "+err);
+                log.e(error.message);
+                this.config.onError?.(error);
+                this.emlDirectBackupDir=undefined;
+            }
         }
-        return this;
+    }
+
+    isListenerReady() : boolean {
+        if (this.smtpServer) {
+            return true;
+        }
+        return false;
     }
 
     isSenderReady() : boolean {
@@ -288,8 +370,8 @@ export class DRemailer {
         return DRemailer.mailSender.status.ready;
     }
 
-    isStorageReady(checkExisting?: boolean) : boolean {
-        if (this.emlParkingDir && this.emlDirectDir && this.emlErrorDir) {
+    isStorageReady(checkExisting: boolean) : boolean {
+        if (this.emlParkingDir && this.emlDirectDir && this.emlErrorDir && this.emlParkingBackupDir && this.emlDirectBackupDir) {
             if (checkExisting) {
                 log.d("Check existing");
                 let found=true;
@@ -305,14 +387,20 @@ export class DRemailer {
                     this.emlErrorDir=undefined;
                     found=false;
                 }
-
-                if (found) {
-                    return true;
+                if (!fss.existsSync(this.emlParkingBackupDir)) {
+                    this.emlParkingBackupDir=undefined;
+                    found=false;
                 }
+                if (!fss.existsSync(this.emlDirectBackupDir)) {
+                    this.emlDirectBackupDir=undefined;
+                    found=false;
+                }
+                return found;
             }
+            return true;
         }
 
-        log.e("Storage not ready: Interval ms="+this.timerIntervalMs+" Parking folder="+this.emlParkingDir+ " Direct folder="+this.emlDirectDir+" Error folder="+this.emlErrorDir);
+        log.e("Storage not ready: Interval ms="+this.timerIntervalMs+" Parking folder="+this.emlParkingDir+" Direct folder="+this.emlDirectDir+" Error folder="+this.emlErrorDir+" Parking backup folder="+this.emlParkingBackupDir+" Direct backup folder="+this.emlDirectBackupDir);
         return false;
     }
 
@@ -320,12 +408,8 @@ export class DRemailer {
      * Start Remailer:
      * - Retrive eml storage content
      * - Start listener
-     * 
-     * @returns true on succefull this.smtpServer.listen() call.
-     * N.B.
-     * true does not mean that server is fully started.
      */
-    start(): boolean {
+    start() {
         log.d("Starting...");
         if (this.listenerRunning) {
             log.w("Listener already running");
@@ -333,20 +417,20 @@ export class DRemailer {
                 this.listenerPaused=false;
                 log.w("RESUMED from pause");
             }
-            return true;
+            return;
         }
         
         if (!this.status.ready) {
             const err=new Error("Cannot start, remailer not ready: "+this.status.message);
             log.e(err.message);
             this.config.onError?.(err);
-            return false;
+            return;
         }
 
         if (!this.smtpServer) {
             // may be redundant
             const err=new Error("Cannot start, remailer is not initilized. Call init() before start()");
-            return false;
+            return;
         }
 
         if (this.senderPaused) {
@@ -356,19 +440,22 @@ export class DRemailer {
         else {
             this.stopSenderTimer();
             if (this.emlParkingDir) {
-                this.scanParkingSync();
+                this.scanStorageSync();
             }
 
+            //this.listenerStarting=true;
             this.smtpServer.listen(this.config.listenerPort,this.config.listenerAddress, (() => {
                 this.status = { ready: true, message: log.d("Listener started") };
                 if (this.timerIntervalMs > 0) {
                     this.startSenderTimer();
                 }
+                //this listenerStarting=false;
                 this.listenerRunning=true;
+                return true
             }));
         }
 
-        return true;
+        return;
     }
 
     stop() {
@@ -384,80 +471,108 @@ export class DRemailer {
      * Scan eml files storage folder and fill this.emlQueue with filenames list (async version).
      * @returns true on fs read error, otherwise true.
      */
-    private async scanStorage() {
+    async scanStorageAsync() : Promise<DRemailerStorage> {
         log.d("Scanning eml files...");
-        if (!this.isStorageReady()) {
+        if (!this.isStorageReady(true)) {
             // Storage not ready, clean all queues
-            this.emlParkingQueue = [];
-            this.emlDirectQueue = [];
-            this.emlErrorQueue = [];
+            this.emlParkingQueue=[];
+            this.emlDirectQueue=[];
+            this.emlErrorQueue=[];
+            this.emlParkingBackupQueue=[];
+            this.emlDirectBackupQueue=[];
             const err=new Error("Parking storage folder not available");
             this.status = { ready: false, message: log.e(err.message) };
             this.config.onError?.(err);
             return Promise.reject(err);
         }
 
-        if (this.isEmlScanning) {
-            log.w("Already scanning...")
-            return;
+        if (this.emlScanning) {
+            const err= new Error(log.w("Already scanning..."));
+            return Promise.reject(err);
         }
 
-        this.isEmlScanning = true;
-        let parkingScanning=true;
-        //return new Promise<void>(function (resolve,reject) {
-            if (this.emlParkingDir) {
-                fss.readdir(this.emlParkingDir, {withFileTypes: true}, (err, files) => {
-                    parkingScanning = false;
-                    if (err) {
-                        this.emlParkingQueue=[];
-                        const error=new Error("Parking storage scanning error: "+err.message);
-                        this.config.onError?.(error);
-                    }   
-                    else {
-                        this.emlParkingQueue=files.filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
-                    }
-                })
-            }
+        // Global scanning
+        this.emlScanning = true;
 
-            this.status = { ready: true, message: log.d("eml files scanning end, files count: "+this.emlQueue.length) };
-            this.status = { ready: false, message: log.e(err.message) };
-        //});
+        log.d("Start async scan parking");
+        const pParking=findFiles(this.emlParkingDir!,"eml");
+        log.d("Start async scan direct");
+        const pDirect=findFiles(this.emlDirectDir!,"eml");
+        log.d("Start async scan error");
+        const pError=findFiles(this.emlErrorDir!,"eml");
+        log.d("Start async scan parking backup");
+        const pParkingBackup=findFiles(this.emlParkingBackupDir!,"eml");
+        log.d("Start async scan direct backup");
+        const pDirectBackup=findFiles(this.emlDirectBackupDir!,"eml");
+
+        const pAll=Promise.all([pParking,pDirect,pError,pParkingBackup,pDirectBackup]);
+        return pAll.then((pList) => {
+            log.d("End async scan");
+            [this.emlParkingQueue, this.emlDirectQueue, this.emlErrorQueue, this.emlParkingBackupQueue, this.emlDirectBackupQueue] = pList;
+            this.emlScanning=false;
+            const result: DRemailerStorage = {
+                parking: this.emlParkingQueue,
+                direct: this.emlDirectQueue,
+                error: this.emlErrorQueue,
+                parkingBackup: this.emlParkingBackupQueue,
+                directBackup: this.emlDirectBackupQueue,
+            }
+            return result;
+        });
     }
 
     /**
      * Scan eml files storage folder and fill this.emlQueue with filenames list (sync version).
      * @returns true on fs read error, otherwise true.
      */
-    private scanStorageSync() : boolean {
+    private scanStorageSync() : DRemailerStorage | undefined {
         log.d("Scanning eml files...");
-        if (!this.isStorageReady()) {
+        if (!this.isStorageReady(true)) {
             // Storage not ready, clean all queues
-            this.emlParkingQueue = [];
-            this.emlDirectQueue = [];
-            this.emlErrorQueue = [];
+            this.emlParkingQueue=[];
+            this.emlDirectQueue=[];
+            this.emlErrorQueue=[];
+            this.emlParkingBackupQueue=[];
+            this.emlDirectBackupQueue=[];
             const err=new Error("Parking storage folder not available");
             this.status = { ready: false, message: log.e(err.message) };
             this.config.onError?.(err);
-            return Promise.reject(err);
+            return;
         }
 
-        if (this.isEmlScanning) {
+        if (this.emlScanning) {
             log.w("Already scanning...")
             return;
         }
 
-        this.isEmlScanning = true;
-        this.emlQueue=fss.readdirSync(this.emlParkingDir, {withFileTypes: true}).filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
-        this.status = { ready: true, message: log.d("eml files scanning end, files count: "+this.emlQueue.length) };
-        this.isEmlScanning = false;
-        return true;
+        this.emlScanning = true;
+        this.emlParkingQueue=fss.readdirSync(this.emlParkingDir!, {withFileTypes: true}).filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
+        this.emlDirectQueue=fss.readdirSync(this.emlDirectDir!, {withFileTypes: true}).filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
+        this.emlErrorQueue=fss.readdirSync(this.emlErrorDir!, {withFileTypes: true}).filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
+        this.emlParkingBackupQueue=fss.readdirSync(this.emlParkingBackupDir!, {withFileTypes: true}).filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
+        this.emlDirectBackupQueue=fss.readdirSync(this.emlDirectBackupDir!, {withFileTypes: true}).filter(item => !item.isDirectory() && item.name.split('.').pop() == "eml").map(item => item.name);
+
+        this.status = { ready: true, message: log.d("eml files scanning end") };
+        this.emlScanning = false;
+        const result: DRemailerStorage = {
+            parking: this.emlParkingQueue,
+            direct: this.emlDirectQueue,
+            error: this.emlErrorQueue,
+            parkingBackup: this.emlParkingBackupQueue,
+            directBackup: this.emlDirectBackupQueue,
+        }
+        return result;
     }
 
     private async saveEmailToDisk(stream: SMTPServerDataStream, session: SMTPServerSession, folder: string) : Promise<string> {
         this.config.onSaving?.(session);
         log.d("Try to save email id: "+session.id+" to "+folder);
         const currentDate = new Date().toISOString().replace(/[^\d]/g, "");
-        const fileName = currentDate + "_" + session.id + ".eml";
+        const fromAddr=session.envelope.mailFrom ? session.envelope.mailFrom.address.replace(/[@.]/g, "-") : "bho";
+        const toAddr=session.envelope.rcptTo ? session.envelope.rcptTo : [];
+        // Only first address
+        const toAddrStr=toAddr.slice(0).map((address) => address.address.replace(/[@.]/g, "-")).join("-");
+        const fileName = currentDate + "_" + session.id + "_" + fromAddr + "_" + toAddrStr + ".eml";
         const filePath = path.join(folder, fileName);
 
         return await new Promise<string>((resolve, reject) => {
@@ -474,35 +589,58 @@ export class DRemailer {
         })
     }
 
+    /**
+     * Forward one email from emlParkingQueue.
+     * If sent:
+     * - Email is dequed.
+     * - Email is deleted from parking storage.
+     * If error:
+     * - Does nothing.
+     * 
+     * @returns server sent respond info.
+     */
     async forwardOne() : Promise<any> {
         if (!this.emlParkingDir) {
-            this.emlQueue = [];
+            this.emlParkingQueue = [];
             const err=new Error("Parking storage folder not available");
             this.status = { ready: false, message: log.e(err.message) };
             this.config.onError?.(err);
             return false;
         }
 
-        const emlFile = this.emlQueue.shift();
-        if (emlFile) {
-            const emlFilename=path.join(this.emlParkingDir,emlFile);
-            log.d("Forwarding "+emlFile);
+        const emlName = this.emlParkingQueue.shift();
+        if (emlName) {
+            const emlFilename=path.join(this.emlParkingDir,emlName);
+            log.d("Forwarding "+emlName);
             return this.forward(emlFilename)
             .then(async (info) => {
-                // delete file
-                return await fsu.unlink(emlFilename)
-                .catch((err: Error) => {
-                    this.config.onError?.(err);
-                    return err
-                })
-                .then(() => {
-                    return info;
-                })
+                if (this.config.backupEnabled) {
+                    log.d("Backing up "+emlName);
+                    return await this.moveToParkingBackup(emlFilename)
+                    .catch((err: Error) => {
+                        return err
+                    })
+                    .then(() => {
+                        return info;
+                    })
+                }
+                else {
+                    // delete file
+                    log.d("Deleting "+emlName);
+                    return await fsu.unlink(emlFilename)
+                    .catch((err: Error) => {
+                        this.config.onError?.(err);
+                        return err
+                    })
+                    .then(() => {
+                        return info;
+                    })
+                }
             })
             .catch((err) => {
                 //log.e("eml file " + emlFile + " not sent: ", err.message);
                 // Re-push to the end of queue
-                this.emlQueue.push(emlFile);
+                this.emlParkingQueue.push(emlName);
                 return err;
             })
         }
@@ -529,11 +667,19 @@ export class DRemailer {
             })
         });
     }
-
-    getEmlQueueList() : string[] {
-        return this.emlQueue;
+/*
+    getParkingQueueList() : string[] {
+        return this.emlParkingQueue;
     }
 
+    getDirectQueueList() : string[] {
+        return this.emlDirectQueue;
+    }
+
+    getErrorQueueList() : string[] {
+        return this.emlErrorQueue;
+    }
+*/
     moveToError(emlFilename: string, error: Error) {
         if (!this.emlErrorDir) {
             const err=new Error("Cannot move "+emlFilename+" to error folder: folder is unavailable");
@@ -547,6 +693,50 @@ export class DRemailer {
                 log.e("Cannot move "+emlFile+" to error folder: ",err.message);
                 this.config.onError?.(err);
             }
+        });
+    }
+
+    moveToParkingBackup(emlFilename: string) {
+        const emlFile=path.basename(emlFilename);
+        return new Promise<void>((resolve,reject) => {
+            if (!this.emlParkingBackupDir) {
+                const err=new Error("Cannot move "+emlFilename+" to backup folder: folder is unavailable");
+                log.e(err.message);
+                this.config.onError?.(err);
+                return reject(err);
+            }
+            fss.rename(emlFilename,path.join(this.emlParkingBackupDir,emlFile), (err) => {
+                if (err) {
+                    log.e("Cannot move "+emlFile+" to parking bakup folder: ",err.message);
+                    this.config.onError?.(err);
+                    return reject(err);
+                }
+                else {
+                    return resolve();
+                }
+            });
+        });
+    }
+
+    moveToDirectBackup(emlFilename: string) {
+        return new Promise<void> ((resolve,reject) => {
+            if (!this.emlDirectBackupDir) {
+                const err=new Error("Cannot move "+emlFilename+" to direct backup folder: folder is unavailable");
+                log.e(err.message);
+                this.config.onError?.(err);
+                return reject(err);
+            }
+            const emlFile=path.basename(emlFilename);
+            fss.rename(emlFilename,path.join(this.emlDirectBackupDir,emlFile), (err) => {
+                if (err) {
+                    log.e("Cannot move "+emlFile+" to error folder: ",err.message);
+                    this.config.onError?.(err);
+                    return reject(err);
+                }
+                else {
+                    return resolve();
+                }
+            });
         });
     }
 
@@ -598,7 +788,7 @@ export class DRemailer {
                     this.saveEmailToDisk(stream, session, this.emlParkingDir)
                     .then((emlName) => {
                         // Queue for send
-                        this.emlQueue.push(emlName);
+                        this.emlParkingQueue.push(emlName);
                         callback();
                     })
                     .catch((err) => {
@@ -630,13 +820,27 @@ export class DRemailer {
                         .then(async (info) => {
                             //log.d("forward info=",info)
                             callback();
-                            // delete file
-                            await fsu.unlink(emlFilename)
-                            .catch((err: Error) => {
-                                const error=new Error("Cannot delete file: "+emlFilename+" "+err.message);
-                                log.e(err.message)
-                                this.config.onError?.(error);
-                            })
+                            if (this.config.backupEnabled) {
+                                // Backup file
+                                log.d("Backing up "+emlName);
+                                return await this.moveToDirectBackup(emlFilename)
+                                .catch((err: Error) => {
+                                    return err
+                                })
+                                .then(() => {
+                                    return info;
+                                })
+                            }
+                            else {
+                                // Delete file
+                                log.d("Deleting "+emlName)
+                                await fsu.unlink(emlFilename)
+                                .catch((err: Error) => {
+                                    const error=new Error("Cannot delete file: "+emlFilename+" "+err.message);
+                                    log.e(err.message)
+                                    this.config.onError?.(error);
+                                });
+                            }
                         })
                         .catch((err) => {
                             callback(err);
@@ -702,9 +906,9 @@ export class DRemailer {
 
     startSenderTimer() {
         if (!this.isSenderReady() || this.senderPaused) {
-            const err=new Error("Sender is disabled, remailer is in "+MODE_STORAGE+" MODE");
+            const err=new Error("Sender is disabled, timer cannot be started");
             log.w(err.message);
-            this.config.onError?.(err);
+            this.config.onWarning?.(err);
             return;
         }
         if (this.timerIntervalMs <= 0) {
@@ -718,8 +922,8 @@ export class DRemailer {
         this.timerHandle = setInterval(() => {
             //log.d("tick");
             if (!this.senderPaused) {
-                if (this.isEmlScanning) {
-                    log.e("Storage scanning in progress... do nothing");
+                if (this.emlScanning && this.emlDirectQueue.length > 0) {
+                    log.w("Storage scanning in progress, wait");
                     return;
                 }
                 this.forwardOne();
@@ -735,6 +939,7 @@ export class DRemailer {
     // *******************************************************************
 
     suspendSender(suspended: boolean) {
+        log.d("Suspending sender...");
         if (this.senderPaused != suspended) {
             if (suspended) {
                 log.w("Sender manual PAUSED");
@@ -758,47 +963,86 @@ export class DRemailer {
         this.listenerPaused=suspended;
     }
 
-    showSummary() {
-        log.d("Summary:")
+    getSummary() {
+        const remailerStatus: DRemailerStatus = {
+            listener: {
+                ready: this.isListenerReady(),
+                running: !this.listenerPaused,
+                address: this.config.listenerAddress ? this.config.listenerAddress : "",
+                port: this.config.listenerPort ? this.config.listenerPort : 0,
+                mode: this.config.listenerLmtp ? "LMTP" : "SMTP",
+                TLS: this.config.listenerSecure ? this.config.listenerSecure : false,
+            },
+            sender: {
+                ready: this.isSenderReady(),
+                running: !this.senderPaused,
+                host: this.config.senderSmtpHost ? this.config.senderSmtpHost : "",
+                port: this.config.senderSmtpPort ? this.config.senderSmtpPort : 0,
+                mode: this.config.senderLmtp ? "LMTP" : "SMTP",
+                TLS: this.config.senderSmtpSecure ? this.config.senderSmtpSecure : false,
+                ignoreCRT: this.config.senderIgnoreInvalidCert ? this.config.senderIgnoreInvalidCert : false,
+            },
+            timer: {
+                enabled: this.timerIntervalMs <= 0 ? true : false,
+                sec: (this.timerIntervalMs / 1000),
+            },
+            storage: {
+                ready: this.isStorageReady(true),
+            }
+        }
+
+        return remailerStatus;
+        /*
+        let summary = ["Summary:"];
         if (this.smtpServer) {
-            log.d("Listener Address:  "+this.config.listenerAddress);
-            log.d("Listener Port:     "+this.config.listenerPort);
-            log.d("Listener mode:     "+(this.config.listenerLmtp ? "LMTP" : "SMTP"));
-            log.d("Listener TLS:      "+(this.config.listenerSecure ? "ENABLED" : "DISABLED"));
+            summary.push("Listener Address:  "+this.config.listenerAddress);
+            summary.push("Listener Port:     "+this.config.listenerPort);
+            summary.push("Listener mode:     "+(this.config.listenerLmtp ? "LMTP" : "SMTP"));
+            summary.push("Listener TLS:      "+(this.config.listenerSecure ? "ENABLED" : "DISABLED"));
         }
         else {
-            log.d("Listener:          DISABLED");
+            summary.push("Listener:          DISABLED");
         }
         
         if (this.config.senderSmtpHost) {
-            log.d("Sender host:       "+this.config.senderSmtpHost);
-            log.d("Sender port:       "+this.config.senderSmtpPort);
-            log.d("Sender mode:       "+(this.config.senderLmtp ? "SMTP" : "SMTP"));
-            log.d("Sender TLS:        "+(this.config.senderSmtpSecure ? "ENABLED" : "DISABLED"));
-            log.d("Sender Ignore CRT: "+(this.config.senderIgnoreInvalidCert ? "ENABLED" : "DISABLED"));
+            summary.push("Sender host:       "+this.config.senderSmtpHost);
+            summary.push("Sender port:       "+this.config.senderSmtpPort);
+            summary.push("Sender mode:       "+(this.config.senderLmtp ? "LMTP" : "SMTP"));
+            summary.push("Sender TLS:        "+(this.config.senderSmtpSecure ? "ENABLED" : "DISABLED"));
+            summary.push("Sender Ignore CRT: "+(this.config.senderIgnoreInvalidCert ? "ENABLED" : "DISABLED"));
         }
         else {
-            log.d("Sender:            DISABLED");
+            summary.push("Sender:            DISABLED");
         }
 
         if (this.timerIntervalMs <= 0) {
-            log.d("Timer:             DISABLED ("+MODE_DIRECT_FORWARD+" MODE)");
+            summary.push("Timer:             DISABLED ("+MODE_DIRECT_FORWARD+" MODE)");
         }
         else if (this.timerIntervalMs > 0) {
-            log.d("Timer:             "+(this.timerIntervalMs / 1000)+" Sec ("+MODE_TIMED+" MODE)");
+            summary.push("Timer:             "+(this.timerIntervalMs / 1000)+" Sec ("+MODE_TIMED+" MODE)");
             if (!this.isSenderReady()) {
                 log.w("Timer is set but sender is disabled");
             }
         }
             
-        log.d("Parking folder:    "+(this.emlParkingDir ? path.resolve(this.emlParkingDir) : "UNAVAILABLE"));
-        log.d("Direct folder:     "+(this.emlDirectDir ? path.resolve(this.emlDirectDir) : "UNAVAILABLE"));
+        summary.push("Parking folder:    "+(this.emlParkingDir ? path.resolve(this.emlParkingDir) : "UNAVAILABLE"));
+        summary.push("Direct folder:     "+(this.emlDirectDir ? path.resolve(this.emlDirectDir) : "UNAVAILABLE"));
 
+        return summary;
+        */
+    }
+
+    showSummary() {
+        log.d("Summary",this.getSummary());
         if (this.listenerPaused) {
             log.w("Listener:          PAUSED");
         }
         if (this.senderPaused) {
             log.w("Sender:            PAUSED");
         }
+    }
+
+    getStatus() {
+
     }
 }
