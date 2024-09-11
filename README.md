@@ -1,6 +1,51 @@
-# dremailer
+LICENZA - [![License](https://img.shields.io/github/license/italia/bootstrap-italia.svg)](https://github.com/italia/bootstrap-italia/blob/master/LICENSE)
+ISSUES - [![GitHub issues](https://img.shields.io/github/issues/italia/bootstrap-italia.svg)](https://github.com/italia/bootstrap-italia/issues)
+# DRemailer
 
 
+## DMailSender module
+``` ts
+// Create config
+    const senderConfig: DMailSenderConfig = {
+        smtpHost: process.env.EMAIL_HOST,
+        smtpPort: process.env.EMAIL_PORT,
+        secure: envVal(process.env.EMAIL_SECURE),
+        auth: {
+            user: process.env.EMAIL_USERNAME,
+            pass: process.env.EMAIL_PASSWORD,
+        }
+    };
+    // Istantiate server
+    const mailSender = new DMailSender(senderConfig);
+    // Init server
+    mailSender.init();
+    if (!mailSender.status.ready) {
+        const err=new Error("DMailSender init error: "+mailSender.status.message);
+        res.status(400).send(log_err(err.message));
+        return;
+    }
+    // Create message
+    const message: Mail.Options = {
+        from: req.body?.from,       // Sender address
+        to: req.body?.to,           // List of to recipients
+        cc: req.body?.cc,           // List of cc recipients
+        bcc: req.body?.bcc,         // List of bcc recipients
+        replyTo: req.body?.replyTo, // List of replyTo recipients
+        subject: req.body?.subject, // Subject
+        text: req.body?.text,       // Plain text body
+        html: req.body?.html,       // Html body
+    };
+    // Send message
+    mailSender.sendMail(message)
+    .then((info) => {
+        log_msg("Inviata");
+        res.status(200).json(info);
+    })
+    .catch((err: Error) => {
+        log_err(err.message);
+        res.status(400).send(err.message);
+    })
+```
 
 ## Getting started
 

@@ -1,5 +1,6 @@
 TODO:
 
+- [ ] Add delivery status notifications: https://nodemailer.com/smtp/dsn/
 - [ ] express routes:
     - [x] /control
         - [ ] set config
