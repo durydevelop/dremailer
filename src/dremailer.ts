@@ -69,23 +69,23 @@ interface DErrorCallback { (error: Error ): void };
  * -- else emails are saved in emlParkingDir and you need to call forwwardOne() each time you want to forward an email.
  */
 export interface DRemailerConfig {
-    listenerAddress?: string;   // smtp listener address to bound to
-    listenerPort?: number;      // smtp listener port to bound to
-    listenerSecure?: boolean;   // smtp listener secure mode
-    listenerLmtp?: boolean;     // smtp listener lmtp mode
-    listenerGreeting?: string;  // optional greeting message. This message is appended to the default ESMTP response
-    senderSmtpHost?: string;    // smtp forwarding server hostname
-    senderSmtpPort?: number;    // smtp forwarding server port
-    senderSmtpSecure?: boolean; // smtp forwarding server secure mode
-    senderIgnoreInvalidCert?: boolean;
-    senderAuth?: SMTPConnection.AuthenticationType;
-    senderLmtp?: boolean;       // smtp forwarding server lmtp mode
-    emlStorageFolder?: string;  // Local root folder for emails storage
-    sslKey?: string;            // filename of a ssl .key file
-    sslCert?: string;           // filename of a sss .crt file
-    logEnabled?: boolean;       // Enable, disable log
-    timerIntervalSec?: number;  // Interval between each forwarding
-    backupEnabled?: boolean;     // If true, sent email are backupped
+    listenerAddress?: string;           /// smtp listener address to bound to
+    listenerPort?: number;              /// smtp listener port to bound to
+    listenerSecure?: boolean;           /// smtp listener secure mode
+    listenerLmtp?: boolean;             /// smtp listener in lmtp mode
+    listenerGreeting?: string;          /// optional greeting message. This message is appended to the default ESMTP response
+    senderSmtpHost?: string;            /// smtp forwarding server hostname
+    senderSmtpPort?: number;            /// smtp forwarding server port
+    senderSmtpSecure?: boolean;         /// smtp forwarding server secure mode
+    senderIgnoreInvalidCert?: boolean;  /// smtp does not care invalid certificates
+    senderAuth?: SMTPConnection.AuthenticationType; /// smtp forwarding server credentials to use for sending emails
+    senderLmtp?: boolean;               /// smtp forwarding server in lmtp mode
+    emlStorageFolder?: string;          /// Local root folder for emails storage
+    sslKey?: string;                    /// filename of the ssl .key file
+    sslCert?: string;                   /// filename of the sss .crt file
+    logEnabled?: boolean;               /// Enable/disable log
+    timerIntervalSec?: number;          /// Interval between each forwarding
+    backupEnabled?: boolean;            /// If true, sent emails are copied to backup folder
     onReceiving?: DEventCallback;
     onSaving?: DEventCallback;
     onSaved?: DEventCallback;
@@ -930,6 +930,7 @@ export class DRemailer {
             }
         }, this.timerIntervalMs);
     }
+    
     stopSenderTimer() {
         if (this.timerHandle) {
             clearInterval(this.timerHandle);

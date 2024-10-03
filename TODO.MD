@@ -8,6 +8,9 @@ TODO:
         - [x] suspendSender
         - [x] storage list
         - [x] get status
+- [ ] Add listener authentication
+- [ ] Change from,to ecc
+- [ ] retry filed send n times
 
 DONE:
 0.0.1
