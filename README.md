@@ -18,8 +18,10 @@ Help you to send emails when servers like Exchange have "numer of mails per minu
 DRemailer are composed of 3 modules:
 
 ### dremailer.ts
+Main remailer module. Handles receiving, storing and re-sending emails.
 
 ### dmailsender.ts
+Based on [nodemailer](https://nodemailer.com/) library, this module can create, send or forward emails easly.
 
 #### example
 ``` ts
@@ -66,3 +68,4 @@ DRemailer are composed of 3 modules:
 ```
 
 ### routes.ts
+[Express](https://www.npmjs.com/package/express) routes that provide APIs to control remailer remotely.
